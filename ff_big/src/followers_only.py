@@ -24,6 +24,7 @@ from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import accuracy_score
 from xgboost import XGBRegressor
 from sklearn.metrics import mean_absolute_error
+from sklearn.linear_model import SGDRegressor
 
 def export_labels(labels_file):
     labels = {}
@@ -105,7 +106,7 @@ def clf_find():
         if not label == 'birthyear' :
             X_train, X_test, y_train, y_test = train_test_split(data_matrix, labels[label][0:args.tweets+1], train_size=0.9, test_size=0.1)    
             parameters = {'kernel':["linear","poly"], 'C':[0.1, 1, 10, 100, 500],"gamma":["scale","auto"],"class_weight":["balanced",None]}
-            svc = svm.SVC()
+            svc = svm.SVC(verbose=2)
             clf1 = GridSearchCV(svc, parameters, verbose = 0, n_jobs = 8)
             clf1.fit(X_train, y_train)
             logging.info(str(max(clf1.cv_results_['mean_test_score'])) +" training configuration with best score (SVM)")
@@ -125,23 +126,31 @@ def clf_find():
             else:
                 clfs[label] = clf1            
         else:
-            X_train, X_test, y_train, y_test = train_test_split(data_matrix,  labels[label][0:args.tweets+1], train_size=0.9, test_size=0.1)  
-            xgb1 = XGBRegressor()
-            parameters = {'nthread':[4], #when use hyperthread, xgboost may become slower
-                          'objective':['reg:linear'],
-                          'learning_rate': [.03, 0.05, .07], #so called `eta` value
-                          'max_depth': [5, 6, 7],
-                          'min_child_weight': [4],
-                          'silent': [1],
-                          'subsample': [0.7],
-                          'colsample_bytree': [0.7],
-                          'n_estimators': [500]}            
-            clf2 = GridSearchCV(xgb1,parameters,cv = 3,n_jobs = -1,verbose=True)            
+            X_train, X_test, y_train, y_test = train_test_split(data_matrix,  labels[label][0:args.tweets+1], train_size=0.8, test_size=0.2)
+            parameters = {"loss":["squared_loss"],"penalty":["elasticnet"],"alpha":[0.01,0.001,0.0001,0.0005],"l1_ratio":[0,0.05,0.25,0.3,0.6,0.8,0.95,1],"power_t":[0.5,0.1,0.9]}
+            sgd = SGDRegressor(max_iter=10000)         
+            clf_grid = GridSearchCV(estimator=sgd , param_grid=parameters,n_jobs=-1, scoring='neg_mean_absolute_error',cv = 3, verbose=2)
+            clf_grid.fit(X_train,y_train)
+            predictions = clf_grid.predict(X_test)
+            acc0 =  mean_absolute_error(predictions,y_test)
+            logging.info("Test accuracy MAE score SGD regression {}".format(acc0))
+            parameters = {'kernel': ('linear', 'rbf','poly'), 
+                     'C':[1.5,10],
+                     'gamma': [1e-7, 1e-4],
+                     'epsilon':[0.1,0.2,0.5,0.3],
+                     }
+            svr = svm.SVR()
+            clf2 = GridSearchCV(svr, parameters, cv = 3,
+                        n_jobs = -1,
+                        verbose=True, scoring='neg_mean_absolute_error')
             clf2.fit(X_train, y_train)
+            logging.info(str(sum(clf2.cv_results_['mean_test_score'])/len(clf2.cv_results_['mean_test_score'])) +" training configuration with best score (SVM)")
             predictions = clf2.predict(X_test)
-            acc2= mean_absolute_error(y_test, predictions)
-            print(acc2)
-
+            acc2 =  mean_absolute_error(predictions,y_test)
+            logging.info("Test accuracy MAE score SVM regression {}".format(acc2))
+            if acc0 < acc2:
+                clf2 = clf_grid
+                acc2 = acc0
             n_estimators = [int(x) for x in np.linspace(start = 200, stop = 2000, num = 10)]
             max_features = ['auto', 'sqrt']
             max_depth = [int(x) for x in np.linspace(10, 110, num = 11)]
@@ -152,10 +161,11 @@ def clf_find():
             random_grid = {'n_estimators': n_estimators,'max_features': max_features,'max_depth': max_depth,
                            'min_samples_split': min_samples_split,'min_samples_leaf': min_samples_leaf,'bootstrap': bootstrap}
             rf = RandomForestRegressor()
-            clf1 = RandomizedSearchCV(estimator = rf, param_distributions = random_grid, n_iter = 3, cv = 3, verbose=2, random_state=42, n_jobs = -1)
+            clf1 = RandomizedSearchCV(estimator = rf, param_distributions = random_grid, n_iter = 3, cv = 3, verbose=2, random_state=42, n_jobs = -1, scoring='neg_mean_absolute_error')
             clf1.fit(X_train, y_train)
             predictions = clf1.predict(X_test)
             acc = mean_absolute_error(y_test, predictions)
+            logging.info("Test accuracy MAE score SVM regression {}".format(acc))
             print(acc)
             #predictions = clf1.predict()
             #acc_svm = accuracy_score(predictions,y_test)
@@ -167,6 +177,7 @@ def clf_find():
                 
     with open(os.path.join("../train_data/","clf-f.pkl"),mode='wb') as f:
         pickle.dump(clfs,f) 
+        
 def tic():
     #Homemade version of matlab tic and toc functions
     import time
@@ -185,7 +196,7 @@ def fit(path,out_path="../out"):
     test_texts = {}
     inv_g = {0:'male',1:'female'}
     inv_o = {0:'sports',1:'performer',2:'creator',3:'politics'}
-    tokenizer,clfs,reducer = fit_import("/home/koloski20/ff_big/train_data")
+    tokenizer,clfs,reducer = fit_import("/home/koloski20/ff_big2/train_data")
     """
     with open(path) as fnx:
         for line in fnx: 
@@ -216,7 +227,7 @@ def fit(path,out_path="../out"):
     for x in test_texts:                 
         o = inv_o[int(occupation[cnt])]
         g = inv_g[int(gender[cnt])]
-        item = {"id": x, "occupation": o, "gender":g, "birthyear": int(birthyear[cnt])}
+        item = {"id": x, "occupation": o, "gender":g, "birthyear": max(1949,min(1999,int(birthyear[cnt])))}
         print(item)
         v = json.dumps(item)
         cnt = cnt + 1
@@ -251,5 +262,5 @@ if __name__ == "__main__":
     print(args)
     #a = parse_feeds(data_inpt, labels_inpt, all=True)
     #export_labels(labels_inpt)
-    #clf_find()
-    fit(path,path_out)
+    clf_find()
+    #fit(path,path_out)
